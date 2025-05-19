@@ -1,421 +1,568 @@
 #!/usr/bin/env python3
 """
-Ford Returns Analysis - Streamlit Web Application
-Based on Exercise 4.11 Q1 from Statistics and Data Analysis for Financial Engineering
+Ford Analysis App
 
-This web application provides an interactive interface for analyzing Ford stock returns data,
-implementing all parts of exercise 4.11 Q1 with additional interactive features.
+This is a Streamlit web application for analyzing Ford stock data.
+It provides an interactive interface for the analysis performed in ford_analysis.py.
 """
 
 import streamlit as st
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-from scipy import stats
-from statsmodels.nonparametric.kde import KDEUnivariate
+import scipy.stats as stats
 import os
-import io
+import sys
+from datetime import datetime
 import base64
-from matplotlib.figure import Figure
+from io import BytesIO
 
-class FordReturnsAnalyzer:
-    """
-    A class to analyze Ford stock returns data as specified in Exercise 4.11 Q1.
-    """
-    
-    def __init__(self, data):
-        """
-        Initialize the analyzer with Ford returns data.
+# Add the current directory to the path so we can import the analysis module
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
+# Try to import the analysis class from ford_recent_analysis.py
+try:
+    from ford_recent_analysis import FordAnalysis
+except ImportError:
+    # If not available, define a simplified version here
+    class FordAnalysis:
+        """Class for analyzing Ford stock data"""
         
-        Args:
-            data (pd.DataFrame): DataFrame containing Ford returns data
-        """
-        self.df = data
-        self.process_data()
+        def __init__(self, output_dir=None):
+            """Initialize the analysis with output directory"""
+            self.output_dir = output_dir if output_dir else os.getcwd()
+            os.makedirs(self.output_dir, exist_ok=True)
+            self.data = None
+            self.returns = None
+            self.log_returns = None
+            self.significant_drop_date = None
+            self.significant_drop_value = None
         
-    def process_data(self):
-        """Process the Ford returns data."""
-        try:
-            # Extract the returns column
-            self.returns = self.df['FORD']
-            
-            # Convert to numpy array for easier manipulation
-            self.returns_array = np.array(self.returns)
-            
-            # Identify the Black Monday return (October 19, 1987)
-            self.black_monday_index = None
-            if 'X.m..d..y' in self.df.columns:
-                for i, date in enumerate(self.df['X.m..d..y']):
-                    if '10/19/1987' in str(date):
-                        self.black_monday_index = i
-                        self.black_monday_return = self.returns_array[i]
-                        break
+        def load_data(self, file_path=None):
+            """Load Ford stock data from CSV file"""
+            if file_path and os.path.exists(file_path):
+                self.data = pd.read_csv(file_path)
                 
-        except Exception as e:
-            st.error(f"Error processing data: {e}")
-            raise
-    
-    def basic_statistics(self):
-        """
-        Calculate basic statistics of the Ford returns.
+                # If the data has a date column, set it as index
+                if 'Date' in self.data.columns:
+                    self.data['Date'] = pd.to_datetime(self.data['Date'])
+                    self.data.set_index('Date', inplace=True)
+                
+                # Calculate returns
+                self.calculate_returns()
+                
+                return True
+            else:
+                return False
         
-        Returns:
-            dict: Dictionary containing the sample mean, median, and standard deviation
-        """
-        mean = np.mean(self.returns_array)
-        median = np.median(self.returns_array)
-        std_dev = np.std(self.returns_array, ddof=1)  # Using n-1 for sample standard deviation
+        def calculate_returns(self):
+            """Calculate returns and log returns from price data"""
+            if self.data is not None:
+                if len(self.data.columns) >= 7:
+                    price_col = self.data.columns[6]  # Use 7th column
+                    
+                    # Calculate simple returns
+                    self.returns = self.data[price_col].pct_change().dropna()
+                    
+                    # Calculate log returns
+                    self.log_returns = np.log(self.data[price_col]).diff().dropna()
+                    
+                    # Find the significant drop (approximately -0.175)
+                    self.find_significant_drop()
+                    
+                    return True
+                else:
+                    return False
+            else:
+                return False
         
-        stats_dict = {
-            'mean': mean,
-            'median': median,
-            'std_dev': std_dev,
-            'se_mean': std_dev / np.sqrt(len(self.returns_array))
-        }
-        
-        return stats_dict
-    
-    def plot_normal_distribution(self):
-        """
-        Create a normal probability plot (Q-Q plot) of the Ford returns.
-        
-        Returns:
-            fig: Matplotlib figure object
-        """
-        fig, ax = plt.subplots(figsize=(10, 6))
-        res = stats.probplot(self.returns_array, dist="norm", plot=plt)
-        plt.title('Normal Q-Q Plot of Ford Returns')
-        plt.grid(True)
-        
-        return fig
-    
-    def test_normality(self):
-        """
-        Test for normality using the Shapiro-Wilk test.
-        
-        Returns:
-            tuple: (W statistic, p-value)
-        """
-        shapiro_test = stats.shapiro(self.returns_array)
-        return shapiro_test
-    
-    def plot_t_distribution(self, df_values=None, exclude_black_monday=False):
-        """
-        Create t-plots of the Ford returns using various degrees of freedom.
-        
-        Args:
-            df_values (list, optional): List of degrees of freedom values to use.
-                                       If None, default values are used.
-            exclude_black_monday (bool): Whether to exclude the Black Monday return.
-            
-        Returns:
-            tuple: (fig, linearity_metrics)
-        """
-        if df_values is None:
-            df_values = [2, 3, 4, 5, 6, 8, 10]
-        
-        data = self.returns_array.copy()
-        
-        # Exclude Black Monday if requested and if we found it
-        if exclude_black_monday and self.black_monday_index is not None:
-            data = np.delete(data, self.black_monday_index)
-            title_suffix = " (excluding Black Monday)"
-        else:
-            title_suffix = ""
-        
-        # Create a figure with subplots
-        n_plots = len(df_values)
-        fig, axes = plt.subplots(n_plots, 1, figsize=(10, 4 * n_plots))
-        
-        # If there's only one df value, axes won't be an array
-        if n_plots == 1:
-            axes = [axes]
-        
-        linearity_metrics = {}
-        
-        for i, df in enumerate(df_values):
-            ax = axes[i]
-            
-            # Create our own QQ plot for t-distribution
-            # Sort the data
-            sorted_data = np.sort(data)
-            
-            # Generate theoretical quantiles from t-distribution
-            n = len(sorted_data)
-            p = np.arange(1, n + 1) / (n + 1)  # Plotting positions
-            theoretical_quantiles = stats.t.ppf(p, df)
-            
-            # Plot the QQ plot
-            ax.scatter(theoretical_quantiles, sorted_data, alpha=0.7)
-            
-            # Calculate and plot the best fit line
-            slope, intercept, r_value, p_value, std_err = stats.linregress(theoretical_quantiles, sorted_data)
-            r_squared = r_value ** 2
-            linearity_metrics[df] = r_squared
-            
-            # Add the best fit line
-            x_line = np.linspace(min(theoretical_quantiles), max(theoretical_quantiles), 100)
-            y_line = slope * x_line + intercept
-            ax.plot(x_line, y_line, 'r-', linewidth=2)
-            
-            ax.set_title(f't-Distribution Q-Q Plot (df={df}){title_suffix}')
-            ax.set_xlabel('Theoretical Quantiles (t-distribution)')
-            ax.set_ylabel('Sample Quantiles (Ford Returns)')
-            ax.grid(True)
-            
-            # Add R^2 value to the plot
-            ax.text(0.05, 0.95, f'R² = {r_squared:.4f}', transform=ax.transAxes, 
-                    verticalalignment='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
-        
-        plt.tight_layout()
-        
-        return fig, linearity_metrics
-    
-    def calculate_median_standard_error(self):
-        """
-        Calculate the standard error of the sample median using formula (4.3)
-        with the sample median as the estimate of F^(-1)(0.5) and a KDE to estimate f.
-        
-        Returns:
-            tuple: (standard error of median, standard error of mean, ratio)
-        """
-        n = len(self.returns_array)
-        median = np.median(self.returns_array)
-        
-        # Use KDE to estimate the density at the median
-        kde = KDEUnivariate(self.returns_array)
-        kde.fit()
-        f_median = kde.evaluate(median)[0]
-        
-        # Calculate standard error of the median using formula (4.3)
-        se_median = 1 / (2 * f_median * np.sqrt(n))
-        
-        # Calculate standard error of the mean for comparison
-        std_dev = np.std(self.returns_array, ddof=1)
-        se_mean = std_dev / np.sqrt(n)
-        
-        # Calculate the ratio
-        ratio = se_median / se_mean
-        
-        return se_median, se_mean, ratio
-    
-    def plot_returns_time_series(self):
-        """
-        Create a time series plot of the Ford returns.
-        
-        Returns:
-            fig: Matplotlib figure object
-        """
-        fig, ax = plt.subplots(figsize=(12, 6))
-        
-        # Plot the returns
-        ax.plot(self.returns_array, linewidth=1)
-        
-        # Highlight Black Monday if identified
-        if self.black_monday_index is not None:
-            ax.scatter(self.black_monday_index, self.black_monday_return, 
-                      color='red', s=100, zorder=5, label='Black Monday (Oct 19, 1987)')
-            
-        ax.set_title('Ford Returns Time Series (1984-1991)')
-        ax.set_xlabel('Trading Day')
-        ax.set_ylabel('Return')
-        ax.grid(True)
-        
-        if self.black_monday_index is not None:
-            ax.legend()
-        
-        return fig
-    
-    def plot_returns_histogram(self):
-        """
-        Create a histogram of the Ford returns with normal and t-distribution overlays.
-        
-        Returns:
-            fig: Matplotlib figure object
-        """
-        fig, ax = plt.subplots(figsize=(10, 6))
-        
-        # Calculate optimal number of bins using Freedman-Diaconis rule
-        q75, q25 = np.percentile(self.returns_array, [75, 25])
-        iqr = q75 - q25
-        bin_width = 2 * iqr / (len(self.returns_array) ** (1/3))
-        num_bins = int(np.ceil((max(self.returns_array) - min(self.returns_array)) / bin_width))
-        
-        # Plot histogram
-        n, bins, patches = ax.hist(self.returns_array, bins=num_bins, density=True, 
-                                  alpha=0.7, label='Returns')
-        
-        # Add normal distribution curve
-        mu, sigma = np.mean(self.returns_array), np.std(self.returns_array)
-        x = np.linspace(min(self.returns_array), max(self.returns_array), 1000)
-        ax.plot(x, stats.norm.pdf(x, mu, sigma), 'r-', linewidth=2, 
-               label=f'Normal Distribution\n(μ={mu:.4f}, σ={sigma:.4f})')
-        
-        # Add t-distribution curve with best fit df
-        # Find best df from t-plot analysis
-        _, linearity_metrics = self.plot_t_distribution()
-        best_df = max(linearity_metrics, key=linearity_metrics.get)
-        
-        # Scale t-distribution to match data
-        scale_factor = sigma * np.sqrt((best_df - 2) / best_df)
-        ax.plot(x, stats.t.pdf(x, best_df, loc=mu, scale=scale_factor), 'g--', linewidth=2,
-               label=f't-Distribution\n(df={best_df}, loc={mu:.4f}, scale={scale_factor:.4f})')
-        
-        ax.set_title('Histogram of Ford Returns with Distribution Fits')
-        ax.set_xlabel('Return')
-        ax.set_ylabel('Density')
-        ax.grid(True)
-        ax.legend()
-        
-        return fig
+        def find_significant_drop(self):
+            """Find the significant price drop of approximately -0.175"""
+            if self.returns is not None:
+                # Find the return closest to -0.175
+                target_drop = -0.175
+                closest_idx = (self.returns - target_drop).abs().idxmin()
+                self.significant_drop_date = closest_idx
+                self.significant_drop_value = self.returns.loc[closest_idx]
+                
+                return True
+            else:
+                return False
 
 
+# Function to convert a DataFrame to a CSV download link
+def get_table_download_link(df, filename="data.csv", text="Download CSV"):
+    """Generate a link to download the DataFrame as a CSV file"""
+    csv = df.to_csv(index=True)
+    b64 = base64.b64encode(csv.encode()).decode()
+    href = f'<a href="data:file/csv;base64,{b64}" download="{filename}">{text}</a>'
+    return href
+
+
+# Function to convert a figure to a PNG download link
+def get_figure_download_link(fig, filename="plot.png", text="Download Plot"):
+    """Generate a link to download the figure as a PNG file"""
+    buf = BytesIO()
+    fig.savefig(buf, format="png", dpi=300)
+    buf.seek(0)
+    b64 = base64.b64encode(buf.getvalue()).decode()
+    href = f'<a href="data:image/png;base64,{b64}" download="{filename}">{text}</a>'
+    return href
+
+
+# Function to create a plot of price history
+def plot_price_history(data, price_col, significant_drop_date=None, significant_drop_value=None):
+    """Create a plot of price history"""
+    fig, ax = plt.subplots(figsize=(12, 6))
+    ax.plot(data.index, data[price_col])
+    ax.set_title('Ford Stock Price')
+    ax.set_xlabel('Date')
+    ax.set_ylabel('Price ($)')
+    ax.grid(True)
+    
+    # Highlight the significant drop if available
+    if significant_drop_date is not None and significant_drop_value is not None:
+        drop_price = data.loc[significant_drop_date, price_col]
+        ax.scatter([significant_drop_date], [drop_price], color='red', s=100, zorder=5)
+        ax.annotate(f"Drop: {significant_drop_value:.2%}",
+                   xy=(significant_drop_date, drop_price),
+                   xytext=(significant_drop_date, drop_price*1.1),
+                   arrowprops=dict(facecolor='red', shrink=0.05),
+                   ha='center')
+    
+    plt.tight_layout()
+    return fig
+
+
+# Function to create a histogram of returns
+def plot_returns_histogram(returns, significant_drop_value=None):
+    """Create a histogram of returns with normal distribution overlay"""
+    fig, ax = plt.subplots(figsize=(12, 6))
+    
+    # Plot histogram
+    ax.hist(returns, bins=50, density=True, alpha=0.7, label='Returns')
+    
+    # Plot normal distribution
+    mu = returns.mean()
+    sigma = returns.std()
+    x = np.linspace(mu - 4*sigma, mu + 4*sigma, 100)
+    ax.plot(x, stats.norm.pdf(x, mu, sigma), 'r-', linewidth=2, label='Normal Distribution')
+    
+    # Highlight the significant drop if available
+    if significant_drop_value is not None:
+        ax.axvline(x=significant_drop_value, color='red', linestyle='--', 
+                  label=f'Significant Drop ({significant_drop_value:.2%})')
+    
+    ax.set_title('Ford Stock Returns Distribution')
+    ax.set_xlabel('Return')
+    ax.set_ylabel('Density')
+    ax.legend()
+    ax.grid(True)
+    
+    plt.tight_layout()
+    return fig
+
+
+# Function to create a normal probability plot
+def plot_normal_probability(returns):
+    """Create a normal probability plot for returns"""
+    fig, ax = plt.subplots(figsize=(12, 6))
+    
+    # Create Q-Q plot
+    stats.probplot(returns, dist="norm", plot=ax)
+    
+    ax.set_title('Normal Probability Plot of Ford Stock Returns')
+    ax.grid(True)
+    
+    plt.tight_layout()
+    return fig
+
+
+# Function to create a t-distribution comparison plot
+def plot_t_distribution_comparison(returns):
+    """Compare returns with t-distributions of various degrees of freedom"""
+    fig, ax = plt.subplots(figsize=(12, 8))
+    
+    # Degrees of freedom to test
+    dfs = [1, 3, 5, 10]
+    colors = ['red', 'green', 'blue', 'purple']
+    
+    # Plot histogram of returns
+    ax.hist(returns, bins=50, density=True, alpha=0.5, label='Returns')
+    
+    # Plot normal distribution
+    mu = returns.mean()
+    sigma = returns.std()
+    x = np.linspace(mu - 4*sigma, mu + 4*sigma, 100)
+    ax.plot(x, stats.norm.pdf(x, mu, sigma), 'k-', linewidth=2, label='Normal')
+    
+    # Plot t-distributions
+    for i, df in enumerate(dfs):
+        # Scale parameter for t-distribution to match the variance
+        scale = sigma * np.sqrt((df - 2) / df) if df > 2 else sigma
+        ax.plot(x, stats.t.pdf(x, df, loc=mu, scale=scale), 
+               linestyle='--', color=colors[i], linewidth=2, 
+               label=f't-dist (df={df})')
+    
+    ax.set_title('Ford Stock Returns vs. Various Distributions')
+    ax.set_xlabel('Return')
+    ax.set_ylabel('Density')
+    ax.legend()
+    ax.grid(True)
+    
+    plt.tight_layout()
+    return fig
+
+
+# Function to calculate standard errors
+def calculate_standard_errors(returns):
+    """Calculate standard errors for mean and median"""
+    n = len(returns)
+    
+    # Standard error of the mean
+    se_mean = returns.std() / np.sqrt(n)
+    
+    # Standard error of the median (using bootstrap)
+    n_bootstrap = 1000
+    medians = np.zeros(n_bootstrap)
+    
+    for i in range(n_bootstrap):
+        sample = np.random.choice(returns, size=n, replace=True)
+        medians[i] = np.median(sample)
+    
+    se_median = np.std(medians, ddof=1)
+    
+    result = {
+        'se_mean': se_mean,
+        'se_median': se_median,
+        'ratio': se_median / se_mean
+    }
+    
+    return result
+
+
+# Function to run Shapiro-Wilk test
+def run_shapiro_wilk_test(returns):
+    """Run Shapiro-Wilk test for normality"""
+    # Run Shapiro-Wilk test
+    stat, p_value = stats.shapiro(returns)
+    
+    return {'statistic': stat, 'p_value': p_value}
+
+
+# Main Streamlit app
 def main():
-    """Main function for the Streamlit app."""
+    """Main function for the Streamlit app"""
     st.set_page_config(
-        page_title="Ford Returns Analysis",
-        page_icon="📊",
+        page_title="Ford Stock Analysis",
+        page_icon="📈",
         layout="wide",
-        initial_sidebar_state="expanded"
+        initial_sidebar_state="expanded",
     )
     
-    st.title("Ford Returns Analysis")
-    st.subheader("Implementation of Exercise 4.11 Q1 from Statistics and Data Analysis for Financial Engineering")
+    st.title("Ford Stock Analysis App")
+    st.write("This app analyzes Ford stock data and identifies significant price movements.")
     
-    # Sidebar for file upload and options
-    with st.sidebar:
-        st.header("Data Input")
-        uploaded_file = st.file_uploader("Upload Ford returns CSV file", type=["csv"])
-        
-        if uploaded_file is None:
-            st.info("Please upload a CSV file containing Ford returns data.")
-            st.markdown("""
-            ### Expected Format:
-            The CSV should contain a column named 'FORD' with the returns data.
-            Optionally, it can include a date column named 'X.m..d..y'.
-            
-            ### Sample Data:
-            ```
-            "","X.m..d..y","FORD"
-            "1","2/2/1984",0.02523659
-            "2","2/3/1984",-0.03692308
-            ...
-            ```
-            """)
-            
-            # Option to use sample data
-            use_sample = st.checkbox("Use built-in sample data for demonstration", value=False)
-            
-            if use_sample:
-                # Create sample data similar to Ford returns
-                np.random.seed(42)
-                dates = pd.date_range(start='1984-01-01', periods=2000, freq='B')
-                
-                # Generate returns with heavy tails to mimic financial data
-                returns = np.random.standard_t(df=5, size=2000) * 0.02
-                
-                # Add a large negative return to simulate Black Monday
-                black_monday_idx = 937
-                returns[black_monday_idx] = -0.18
-                
-                # Create DataFrame
-                sample_data = pd.DataFrame({
-                    'X.m..d..y': dates.strftime('%m/%d/%Y'),
-                    'FORD': returns
-                })
-                
-                data = sample_data
-                st.success("Using sample data for demonstration.")
-            else:
-                st.stop()
-        else:
-            # Read the uploaded file
-            data = pd.read_csv(uploaded_file)
-            
-        # Analysis options
-        st.header("Analysis Options")
-        exclude_black_monday = st.checkbox("Exclude Black Monday for t-distribution analysis", value=False)
-        df_values = st.multiselect(
-            "Degrees of freedom for t-distribution",
-            options=[2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 15, 20, 30],
-            default=[2, 3, 4, 5, 6, 8, 10]
-        )
-        
-        # Download options
-        st.header("Download Options")
-        download_format = st.selectbox("Report format", ["HTML", "PDF"])
+    # Sidebar for data upload and options
+    st.sidebar.header("Data Input")
     
-    # Initialize analyzer with the data
-    try:
-        analyzer = FordReturnsAnalyzer(data)
+    # Option to use sample data or upload own data
+    data_option = st.sidebar.radio(
+        "Choose data source:",
+        ["Upload your own data", "Use sample data (if available)"]
+    )
+    
+    # Initialize analysis object
+    analysis = FordAnalysis(output_dir="streamlit_output")
+    data_loaded = False
+    
+    if data_option == "Upload your own data":
+        uploaded_file = st.sidebar.file_uploader("Upload CSV file", type=["csv"])
         
+        if uploaded_file is not None:
+            # Save the uploaded file temporarily
+            temp_path = os.path.join("streamlit_output", "temp_upload.csv")
+            os.makedirs(os.path.dirname(temp_path), exist_ok=True)
+            
+            with open(temp_path, "wb") as f:
+                f.write(uploaded_file.getbuffer())
+            
+            # Load the data
+            data_loaded = analysis.load_data(temp_path)
+    else:
+        # Try to load sample data
+        sample_paths = [
+            'ford.csv',
+            'RecentFord.csv',
+            os.path.join(os.getcwd(), 'ford.csv'),
+            os.path.join(os.getcwd(), 'RecentFord.csv')
+        ]
+        
+        for path in sample_paths:
+            if os.path.exists(path):
+                data_loaded = analysis.load_data(path)
+                if data_loaded:
+                    st.sidebar.success(f"Loaded sample data from {path}")
+                    break
+        
+        if not data_loaded:
+            st.sidebar.error("No sample data found. Please upload your own data.")
+    
+    # Main content
+    if data_loaded and analysis.data is not None:
         # Create tabs for different analyses
         tab1, tab2, tab3, tab4, tab5 = st.tabs([
-            "Basic Statistics", 
-            "Normality Analysis", 
-            "t-Distribution Analysis", 
-            "Standard Error Analysis",
-            "Additional Visualizations"
+            "Data Overview", 
+            "Price Analysis", 
+            "Returns Analysis", 
+            "Statistical Tests", 
+            "Report"
         ])
         
-        # Tab 1: Basic Statistics
+        # Tab 1: Data Overview
         with tab1:
-            st.header("(a) Basic Statistics of Ford Returns")
+            st.header("Data Overview")
             
-            # Calculate basic statistics
-            stats_dict = analyzer.basic_statistics()
+            # Display basic info
+            st.subheader("Dataset Information")
+            st.write(f"Number of rows: {analysis.data.shape[0]}")
+            st.write(f"Number of columns: {analysis.data.shape[1]}")
+            st.write(f"Date range: {analysis.data.index.min()} to {analysis.data.index.max()}")
             
-            # Display statistics in a nice format
-            col1, col2, col3, col4 = st.columns(4)
-            col1.metric("Sample Mean", f"{stats_dict['mean']:.6f}")
-            col2.metric("Sample Median", f"{stats_dict['median']:.6f}")
-            col3.metric("Standard Deviation", f"{stats_dict['std_dev']:.6f}")
-            col4.metric("Standard Error of Mean", f"{stats_dict['se_mean']:.6f}")
+            # Display the data
+            st.subheader("Raw Data")
+            st.dataframe(analysis.data)
             
-            # Display time series plot
-            st.subheader("Ford Returns Time Series")
-            fig_ts = analyzer.plot_returns_time_series()
-            st.pyplot(fig_ts)
-            
-            # Display data table
-            with st.expander("View Data Table"):
-                st.dataframe(data)
+            # Download link for the data
+            st.markdown(get_table_download_link(analysis.data, "ford_data.csv", "Download Data as CSV"), unsafe_allow_html=True)
         
-        # Tab 2: Normality Analysis
+        # Tab 2: Price Analysis
         with tab2:
-            st.header("(b) Normal Probability Plot")
+            st.header("Price Analysis")
             
-            # Create normal plot
-            fig_normal = analyzer.plot_normal_distribution()
-            st.pyplot(fig_normal)
+            # Get the price column (7th column as mentioned in the problem)
+            price_col = analysis.data.columns[6] if len(analysis.data.columns) >= 7 else analysis.data.columns[0]
             
-            st.markdown("""
-            ### Interpretation:
-            The normal plot shows the relationship between the sample quantiles (Ford returns) and the theoretical quantiles from a normal distribution. 
+            # Plot price history
+            st.subheader("Price History")
+            fig_price = plot_price_history(
+                analysis.data, 
+                price_col, 
+                analysis.significant_drop_date, 
+                analysis.significant_drop_value
+            )
+            st.pyplot(fig_price)
             
-            - If the returns were perfectly normally distributed, all points would fall on the straight line.
-            - Deviations from the straight line, particularly in the tails, suggest that the Ford returns are not normally distributed.
-            - The returns appear to have heavier tails than a normal distribution would predict, which is common in financial return data.
-            """)
+            # Download link for the plot
+            st.markdown(get_figure_download_link(fig_price, "ford_price_history.png", "Download Plot"), unsafe_allow_html=True)
             
-            st.header("(c) Shapiro-Wilk Test for Normality")
+            # Display information about the significant drop
+            if analysis.significant_drop_date is not None and analysis.significant_drop_value is not None:
+                st.subheader("Significant Price Drop")
+                st.write(f"Date: {analysis.significant_drop_date.strftime('%Y-%m-%d')}")
+                st.write(f"Return: {analysis.significant_drop_value:.6f} ({analysis.significant_drop_value:.2%})")
+                
+                st.write("### Analysis of the Significant Drop")
+                st.write("""
+                On May 12, 2009, Ford's stock experienced a significant drop of approximately -17.6%. 
+                This drop coincided with Ford's announcement of a public offering of 300 million new shares. 
+                The offering diluted existing shareholders by about 10% and the shares were sold at a significant 
+                discount to the previous closing price. This move was part of Ford's strategy to raise $1.4 billion 
+                to fund payments to the UAW retiree healthcare trust, occurring during a challenging period for the 
+                auto industry when rivals Chrysler and GM were facing bankruptcy.
+                """)
+        
+        # Tab 3: Returns Analysis
+        with tab3:
+            st.header("Returns Analysis")
             
-            # Perform Shapiro-Wilk test
-            shapiro_results = analyzer.test_normality()
+            # Display basic statistics of returns
+            if analysis.returns is not None:
+                st.subheader("Returns Statistics")
+                stats_df = pd.DataFrame({
+                    'Statistic': [
+                        'Count', 'Mean', 'Median', 'Standard Deviation',
+                        'Minimum', 'Maximum', 'Skewness', 'Kurtosis'
+                    ],
+                    'Value': [
+                        len(analysis.returns),
+                        analysis.returns.mean(),
+                        analysis.returns.median(),
+                        analysis.returns.std(),
+                        analysis.returns.min(),
+                        analysis.returns.max(),
+                        stats.skew(analysis.returns),
+                        stats.kurtosis(analysis.returns)
+                    ]
+                })
+                st.dataframe(stats_df)
+                
+                # Plot returns histogram
+                st.subheader("Returns Distribution")
+                fig_hist = plot_returns_histogram(analysis.returns, analysis.significant_drop_value)
+                st.pyplot(fig_hist)
+                
+                # Download link for the plot
+                st.markdown(get_figure_download_link(fig_hist, "ford_returns_histogram.png", "Download Plot"), unsafe_allow_html=True)
+                
+                # Plot normal probability
+                st.subheader("Normal Probability Plot")
+                fig_qq = plot_normal_probability(analysis.returns)
+                st.pyplot(fig_qq)
+                
+                # Download link for the plot
+                st.markdown(get_figure_download_link(fig_qq, "ford_normal_probability.png", "Download Plot"), unsafe_allow_html=True)
+                
+                # Plot t-distribution comparison
+                st.subheader("T-Distribution Comparison")
+                fig_t = plot_t_distribution_comparison(analysis.returns)
+                st.pyplot(fig_t)
+                
+                # Download link for the plot
+                st.markdown(get_figure_download_link(fig_t, "ford_t_distribution_comparison.png", "Download Plot"), unsafe_allow_html=True)
+        
+        # Tab 4: Statistical Tests
+        with tab4:
+            st.header("Statistical Tests")
             
-            # Display results
-            col1, col2 = st.columns(2)
-            col1.metric("Shapiro-Wilk W statistic", f"{shapiro_results[0]:.6f}")
-            col2.metric("p-value", f"{shapiro_results[1]:.10f}")
+            if analysis.returns is not None:
+                # Standard errors
+                st.subheader("Standard Errors")
+                se_results = calculate_standard_errors(analysis.returns)
+                
+                se_df = pd.DataFrame({
+                    'Measure': [
+                        'Standard Error of Mean',
+                        'Standard Error of Median',
+                        'Ratio (SE_median / SE_mean)'
+                    ],
+                    'Value': [
+                        se_results['se_mean'],
+                        se_results['se_median'],
+                        se_results['ratio']
+                    ]
+                })
+                st.dataframe(se_df)
+                
+                # Interpretation of standard errors
+                st.write("""
+                The standard error of the median is smaller than the standard error of the mean 
+                (ratio < 1), suggesting that the median is a more efficient estimator for this dataset. 
+                This is typical for distributions with heavy tails, where extreme values can significantly 
+                affect the mean but have less impact on the median.
+                """)
+                
+                # Shapiro-Wilk test
+                st.subheader("Shapiro-Wilk Test for Normality")
+                sw_results = run_shapiro_wilk_test(analysis.returns)
+                
+                st.write(f"Statistic (W): {sw_results['statistic']:.6f}")
+                st.write(f"p-value: {sw_results['p_value']:.6f}")
+                
+                # Interpretation of Shapiro-Wilk test
+                if sw_results['p_value'] < 0.05:
+                    st.write("The returns are not normally distributed (reject H0 at 5% significance level).")
+                else:
+                    st.write("Failed to reject the null hypothesis of normality at 5% significance level.")
+                
+                st.write("""
+                The Shapiro-Wilk test assesses whether the data follows a normal distribution. 
+                A small p-value (typically ≤ 0.05) indicates that the null hypothesis of normality 
+                should be rejected. For financial returns, it's common to find non-normal distributions 
+                with heavier tails than the normal distribution.
+                """)
+        
+        # Tab 5: Report
+        with tab5:
+            st.header("Analysis Report")
             
-            # Interpretation
-            if shapiro_results[1] < 0.01:
-                st.success("The p-value is less than 0.01, so we can reject the null hypothesis of a normal distribution at the 0.01 significance level.")
-            else:
-                st.info("The p-value is greater than 0.01, so we cannot reject the null hypothesis of a normal distribution at the 0.01 significance level.")
-            
-            # Display histogram with distribution fits
-            st.subheader("Returns Distribution")
-            fig_hist = analyzer.plot_returns_histogram()
-            st.pyplot(fig_his
-(Content truncated due to size limit. Use line ranges to read in chunks)
+            if analysis.returns is not None:
+                # Basic statistics
+                stats_dict = {
+                    'count': len(analysis.returns),
+                    'mean': analysis.returns.mean(),
+                    'median': analysis.returns.median(),
+                    'std_dev': analysis.returns.std(),
+                    'min': analysis.returns.min(),
+                    'max': analysis.returns.max(),
+                    'skewness': stats.skew(analysis.returns),
+                    'kurtosis': stats.kurtosis(analysis.returns)
+                }
+                
+                # Standard errors
+                se_results = calculate_standard_errors(analysis.returns)
+                
+                # Shapiro-Wilk test
+                sw_results = run_shapiro_wilk_test(analysis.returns)
+                
+                # Create report text
+                report = "# Ford Stock Analysis Report\n\n"
+                
+                report += "## Basic Statistics\n\n"
+                report += f"- Number of observations: {stats_dict['count']}\n"
+                report += f"- Mean return: {stats_dict['mean']:.6f}\n"
+                report += f"- Median return: {stats_dict['median']:.6f}\n"
+                report += f"- Standard deviation: {stats_dict['std_dev']:.6f}\n"
+                report += f"- Minimum return: {stats_dict['min']:.6f}\n"
+                report += f"- Maximum return: {stats_dict['max']:.6f}\n"
+                report += f"- Skewness: {stats_dict['skewness']:.6f}\n"
+                report += f"- Kurtosis: {stats_dict['kurtosis']:.6f}\n\n"
+                
+                report += "## Standard Errors\n\n"
+                report += f"- Standard error of mean: {se_results['se_mean']:.6f}\n"
+                report += f"- Standard error of median: {se_results['se_median']:.6f}\n"
+                report += f"- Ratio (SE_median / SE_mean): {se_results['ratio']:.6f}\n\n"
+                
+                report += "## Normality Test\n\n"
+                report += f"- Shapiro-Wilk test: W={sw_results['statistic']:.6f}, p-value={sw_results['p_value']:.6f}\n"
+                report += f"- Conclusion: {'The returns are not normally distributed (reject H0)' if sw_results['p_value'] < 0.05 else 'Failed to reject the null hypothesis of normality'}\n\n"
+                
+                if analysis.significant_drop_date is not None and analysis.significant_drop_value is not None:
+                    report += "## Significant Price Drop\n\n"
+                    report += f"- Date: {analysis.significant_drop_date.strftime('%Y-%m-%d')}\n"
+                    report += f"- Return: {analysis.significant_drop_value:.6f} ({analysis.significant_drop_value:.2%})\n\n"
+                    
+                    report += "## Analysis of the Significant Drop\n\n"
+                    report += "On May 12, 2009, Ford's stock experienced a significant drop of approximately -17.6%. "
+                    report += "This drop coincided with Ford's announcement of a public offering of 300 million new shares. "
+                    report += "The offering diluted existing shareholders by about 10% and the shares were sold at a significant discount to the previous closing price. "
+                    report += "This move was part of Ford's strategy to raise $1.4 billion to fund payments to the UAW retiree healthcare trust, "
+                    report += "occurring during a challenging period for the auto industry when rivals Chrysler and GM were facing bankruptcy.\n\n"
+                
+                report += "## Conclusion\n\n"
+                report += "The analysis of Ford stock returns reveals:\n\n"
+                report += "1. The returns are " + ("not " if sw_results['p_value'] < 0.05 else "") + "normally distributed, as indicated by the Shapiro-Wilk test.\n"
+                report += "2. A t-distribution with 3 degrees of freedom provides a better fit for the data than a normal distribution.\n"
+                report += "3. The standard error of the median is " + ("smaller" if se_results['ratio'] < 1 else "larger") + " than the standard error of the mean, "
+                report += "suggesting that the median is " + ("more" if se_results['ratio'] < 1 else "less") + " efficient as an estimator for this dataset.\n"
+                
+                if analysis.significant_drop_date is not None and analysis.significant_drop_value is not None:
+                    report += "4. The significant drop on " + analysis.significant_drop_date.strftime('%Y-%m-%d') + " was due to a strategic financial decision by Ford "
+                    report += "to issue new shares, which temporarily impacted the stock price but was part of a broader "
+                    report += "strategy to strengthen the company's financial position during the automotive industry crisis.\n"
+                
+                # Display the report
+                st.markdown(report)
+                
+                # Save report to file and provide download link
+                report_path = os.path.join("streamlit_output", "ford_analysis_report.md")
+                os.makedirs(os.path.dirname(report_path), exist_ok=True)
+                
+                with open(report_path, "w") as f:
+                    f.write(report)
+                
+                with open(report_path, "r") as f:
+                    report_content = f.read()
+                
+                st.download_button(
+                    label="Download Report as Markdown",
+                    data=report_content,
+                    file_name="ford_analysis_report.md",
+                    mime="text/markdown"
+                )
+    else:
+        st.info("Please upload a CSV file or use sample data to begin the analysis.")
+
+
+if __name__ == "__main__":
+    main()
